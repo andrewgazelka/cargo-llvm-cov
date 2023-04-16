@@ -63,55 +63,40 @@ pub struct CodeCovJsonExport {
 }
 
 impl Export {
-    fn fake_branch_coverage(value: Export, ignore_filename_regex: Option<&Regex>) -> Self {
-        let functions = value.functions.as_deref().unwrap_or_default();
-
-        // filename -> list of uncovered lines.
-        let mut regions = BTreeMap::new();
+    fn fake_branch_coverage(&mut self, ignore_filename_regex: Option<&Regex>) {
+        let functions = self.functions.as_deref_mut().unwrap_or_default();
 
         for func in functions {
-            // let func_count = func.count; // instances of function
-
             for filename in &func.filenames {
                 if let Some(re) = ignore_filename_regex {
                     if re.is_match(filename) {
                         continue;
                     }
                 }
-                for region in &func.regions {
-                    // region location to covered
-                    let regions: &mut Vec<Region> = regions.entry(filename.clone()).or_default();
-                    regions.push(*region);
-                }
+
+                let branches = func
+                    .regions
+                    .iter()
+                    .map(|region| {
+                        let builder = BranchBuilder {
+                            line_start: region.line_start(),
+                            line_end: region.line_end(),
+                            column_start: region.column_start(),
+                            column_end: region.column_end(),
+                            execution_count: region.execution_count(),
+                            false_execution_count: region.execution_count(),
+                            file_id: region.file_id(),
+                            expanded_file_id: region.expanded_file_id(),
+                            kind: region.kind(),
+                        };
+
+                        Branch::from(builder)
+                    })
+                    .collect();
+
+                func.branches = branches;
             }
         }
-
-        let mut new_export = value;
-        for file in &mut new_export.files {
-            let regions_in_file =
-                regions.get(&file.filename).map(Vec::as_slice).unwrap_or_default();
-
-            let mut branches = Vec::with_capacity(regions_in_file.len());
-
-            for region in regions_in_file {
-                let builder = BranchBuilder {
-                    line_start: region.line_start(),
-                    line_end: region.line_end(),
-                    column_start: region.column_start(),
-                    column_end: region.column_end(),
-                    execution_count: region.execution_count(),
-                    false_execution_count: region.execution_count(),
-                    file_id: region.file_id(),
-                    expanded_file_id: region.expanded_file_id(),
-                };
-
-                branches.push(builder.into());
-            }
-
-            file.branches = Some(branches);
-        }
-
-        new_export
     }
 }
 
@@ -119,15 +104,12 @@ impl Export {
 pub(crate) type UncoveredLines = BTreeMap<String, Vec<u64>>;
 
 impl LlvmCovJsonExport {
-    #[must_use]
-    pub fn fake_branch_coverage(mut self, ignore_filename_regex: Option<&str>) -> Self {
+    pub fn fake_branch_coverage(&mut self, ignore_filename_regex: Option<&str>) {
         let re = ignore_filename_regex.map(|s| Regex::new(s).unwrap());
-        let exports: Vec<_> =
-            self.data.into_iter().map(|v| Export::fake_branch_coverage(v, re.as_ref())).collect();
 
-        self.data = exports;
-
-        self
+        for data in &mut self.data {
+            data.fake_branch_coverage(re.as_ref());
+        }
     }
 
     pub fn demangle(&mut self) {
@@ -368,7 +350,7 @@ impl Debug for Segment {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, serde(deny_unknown_fields))]
 pub(crate) struct Function {
-    pub(crate) branches: Vec<serde_json::Value>,
+    pub(crate) branches: Vec<Branch>,
     pub(crate) count: u64,
     /// List of filenames that the function relates to
     pub(crate) filenames: Vec<String>,
@@ -385,6 +367,7 @@ struct BranchBuilder {
     false_execution_count: u64,
     file_id: u64,
     expanded_file_id: u64,
+    kind: u64,
 }
 
 impl From<BranchBuilder> for Branch {
@@ -398,6 +381,7 @@ impl From<BranchBuilder> for Branch {
             value.false_execution_count,
             value.file_id,
             value.expanded_file_id,
+            value.kind,
         )
     }
 }
@@ -412,6 +396,7 @@ pub(crate) struct Branch(
     /* FalseExecutionCount */ pub(crate) u64,
     /* FileID */ pub(crate) u64,
     /* ExpandedFileID */ pub(crate) u64,
+    /* Kind */ pub(crate) u64,
 );
 
 impl Branch {
@@ -446,6 +431,10 @@ impl Branch {
     pub(crate) fn expanded_file_id(&self) -> u64 {
         self.7
     }
+
+    pub(crate) fn kind(&self) -> u64 {
+        self.8
+    }
 }
 
 impl Debug for Branch {
@@ -459,6 +448,7 @@ impl Debug for Branch {
             .field("false_execution_count", &self.false_execution_count())
             .field("file_id", &self.file_id())
             .field("expanded_file_id", &self.expanded_file_id())
+            .field("kind", &self.kind())
             .finish()
     }
 }
