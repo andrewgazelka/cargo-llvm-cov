@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt::{Debug, Formatter},
 };
 
@@ -62,79 +62,56 @@ pub struct CodeCovJsonExport {
     pub(crate) coverage: BTreeMap<String, CodeCovExport>,
 }
 
-impl CodeCovJsonExport {
-    fn from_export(value: Export, ignore_filename_regex: Option<&Regex>) -> Self {
-        let functions = value.functions.unwrap_or_default();
+impl Export {
+    fn fake_branch_coverage(value: Export, ignore_filename_regex: Option<&Regex>) -> Self {
+        let functions = value.functions.as_deref().unwrap_or_default();
 
+        // filename -> list of uncovered lines.
         let mut regions = BTreeMap::new();
 
         for func in functions {
             // let func_count = func.count; // instances of function
 
-            for filename in func.filenames {
+            for filename in &func.filenames {
                 if let Some(re) = ignore_filename_regex {
-                    if re.is_match(&filename) {
+                    if re.is_match(filename) {
                         continue;
                     }
                 }
                 for region in &func.regions {
-                    let loc = RegionLocation::from(region);
-
                     // region location to covered
-                    let coverage: &mut HashMap<RegionLocation, bool> =
-                        regions.entry(filename.clone()).or_default();
-
-                    let covered = coverage.entry(loc).or_default();
-
-                    *covered = *covered || region.execution_count() > 0; // TODO: maybe this should be compared to func_count?
+                    let regions: &mut Vec<Region> = regions.entry(filename.clone()).or_default();
+                    regions.push(*region);
                 }
             }
         }
 
-        let mut coverage = BTreeMap::new();
+        let mut new_export = value;
+        for file in &mut new_export.files {
+            let regions_in_file =
+                regions.get(&file.filename).map(Vec::as_slice).unwrap_or_default();
 
-        for (filename, regions) in regions {
-            let coverage: &mut CodeCovExport = coverage.entry(filename).or_default();
+            let mut branches = Vec::with_capacity(regions_in_file.len());
 
-            for (loc, covered) in regions {
-                for line in loc.lines() {
-                    let coverage = coverage.0.entry(line).or_default();
-                    coverage.count += 1;
-                    coverage.covered += u64::from(covered);
-                }
+            for region in regions_in_file {
+                let builder = BranchBuilder {
+                    line_start: region.line_start(),
+                    line_end: region.line_end(),
+                    column_start: region.column_start(),
+                    column_end: region.column_end(),
+                    execution_count: region.execution_count(),
+                    false_execution_count: region.execution_count(),
+                    file_id: region.file_id(),
+                    expanded_file_id: region.expanded_file_id(),
+                };
+
+                branches.push(builder.into());
             }
+
+            file.branches = Some(branches);
         }
 
-        Self { coverage }
-    }
-
-    #[must_use]
-    pub fn from_llvm_cov_json_export(
-        value: LlvmCovJsonExport,
-        ignore_filename_regex: Option<&str>,
-    ) -> Self {
-        let re = ignore_filename_regex.map(|s| Regex::new(s).unwrap());
-        let exports: Vec<_> =
-            value.data.into_iter().map(|v| Self::from_export(v, re.as_ref())).collect();
-
-        let mut combined = CodeCovJsonExport::default();
-
-        // combine
-        for export in exports {
-            for (filename, coverage) in export.coverage {
-                let combined = combined.coverage.entry(filename).or_default();
-                for (line, coverage) in coverage.0 {
-                    let combined = combined
-                        .0
-                        .entry(line)
-                        .or_insert_with(|| CodeCovCoverage { count: 0, covered: 0 });
-                    combined.count += coverage.count;
-                    combined.covered += coverage.covered;
-                }
-            }
-        }
-
-        combined
+        new_export
     }
 }
 
@@ -142,6 +119,17 @@ impl CodeCovJsonExport {
 pub(crate) type UncoveredLines = BTreeMap<String, Vec<u64>>;
 
 impl LlvmCovJsonExport {
+    #[must_use]
+    pub fn fake_branch_coverage(mut self, ignore_filename_regex: Option<&str>) -> Self {
+        let re = ignore_filename_regex.map(|s| Regex::new(s).unwrap());
+        let exports: Vec<_> =
+            self.data.into_iter().map(|v| Export::fake_branch_coverage(v, re.as_ref())).collect();
+
+        self.data = exports;
+
+        self
+    }
+
     pub fn demangle(&mut self) {
         for data in &mut self.data {
             if let Some(functions) = &mut data.functions {
@@ -307,7 +295,7 @@ pub(crate) struct File {
     /// This is None if report is summary-only.
     // https://github.com/llvm/llvm-project/blob/llvmorg-16.0.0/llvm/tools/llvm-cov/CoverageExporterJson.cpp#L92
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) branches: Option<Vec<serde_json::Value>>,
+    pub(crate) branches: Option<Vec<Branch>>,
     /// List of expansion records
     ///
     /// This is None if report is summary-only.
@@ -388,6 +376,93 @@ pub(crate) struct Function {
     pub(crate) regions: Vec<Region>,
 }
 
+struct BranchBuilder {
+    line_start: u64,
+    column_start: u64,
+    line_end: u64,
+    column_end: u64,
+    execution_count: u64,
+    false_execution_count: u64,
+    file_id: u64,
+    expanded_file_id: u64,
+}
+
+impl From<BranchBuilder> for Branch {
+    fn from(value: BranchBuilder) -> Self {
+        Self(
+            value.line_start,
+            value.column_start,
+            value.line_end,
+            value.column_end,
+            value.execution_count,
+            value.false_execution_count,
+            value.file_id,
+            value.expanded_file_id,
+        )
+    }
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct Branch(
+    /* LineStart */ pub(crate) u64,
+    /* ColumnStart */ pub(crate) u64,
+    /* LineEnd */ pub(crate) u64,
+    /* ColumnEnd */ pub(crate) u64,
+    /* ExecutionCount */ pub(crate) u64,
+    /* FalseExecutionCount */ pub(crate) u64,
+    /* FileID */ pub(crate) u64,
+    /* ExpandedFileID */ pub(crate) u64,
+);
+
+impl Branch {
+    pub(crate) fn line_start(&self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn column_start(&self) -> u64 {
+        self.1
+    }
+
+    pub(crate) fn line_end(&self) -> u64 {
+        self.2
+    }
+
+    pub(crate) fn column_end(&self) -> u64 {
+        self.3
+    }
+
+    pub(crate) fn execution_count(&self) -> u64 {
+        self.4
+    }
+
+    pub(crate) fn false_execution_count(&self) -> u64 {
+        self.5
+    }
+
+    pub(crate) fn file_id(&self) -> u64 {
+        self.6
+    }
+
+    pub(crate) fn expanded_file_id(&self) -> u64 {
+        self.7
+    }
+}
+
+impl Debug for Branch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Branch")
+            .field("line_start", &self.line_start())
+            .field("column_start", &self.column_start())
+            .field("line_end", &self.line_end())
+            .field("column_end", &self.column_end())
+            .field("execution_count", &self.execution_count())
+            .field("false_execution_count", &self.false_execution_count())
+            .field("file_id", &self.file_id())
+            .field("expanded_file_id", &self.expanded_file_id())
+            .finish()
+    }
+}
+
 #[derive(Copy, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, serde(deny_unknown_fields))]
 pub(crate) struct Region(
@@ -432,32 +507,6 @@ impl Region {
 
     pub(crate) fn kind(&self) -> u64 {
         self.7
-    }
-}
-
-/// The location of a region
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
-pub(crate) struct RegionLocation {
-    start_line: u64,
-    end_line: u64,
-    start_column: u64,
-    end_column: u64,
-}
-
-impl From<&Region> for RegionLocation {
-    fn from(region: &Region) -> Self {
-        Self {
-            start_line: region.line_start(),
-            end_line: region.line_end(),
-            start_column: region.column_start(),
-            end_column: region.column_end(),
-        }
-    }
-}
-
-impl RegionLocation {
-    fn lines(&self) -> impl Iterator<Item = u64> {
-        self.start_line..=self.end_line
     }
 }
 

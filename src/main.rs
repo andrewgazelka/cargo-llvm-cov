@@ -26,7 +26,7 @@ use std::{
 use anyhow::{bail, Context as _, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_config2::Flags;
-use cargo_llvm_cov::json::{CodeCovJsonExport, LlvmCovJsonExport};
+use cargo_llvm_cov::json::{LlvmCovJsonExport};
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -879,7 +879,7 @@ impl Format {
             }
             let cov = cmd.read()?;
             let cov: LlvmCovJsonExport = serde_json::from_str(&cov)?;
-            let cov = CodeCovJsonExport::from_llvm_cov_json_export(cov, ignore_filename_regex);
+            let cov = cov.fake_branch_coverage(ignore_filename_regex);
             let out = serde_json::to_string(&cov)?;
 
             if let Some(output_path) = &cx.args.cov.output_path {
